@@ -52,7 +52,7 @@ template <typename _Tp, typename _NDItemId, typename _Size, typename _TransformP
 inline void
 __group_reduce_kernel(const _NDItemId& __item_id, const _Size& __n, _TransformPattern __transform_pattern,
                            _ReducePattern __reduce_pattern, _InitType __init, const _AccLocal& __local_mem,
-                           const _Res& __res_acc, const _Acc&... __acc)
+                           _Res __res_acc, const _Acc&... __acc)
 {
     auto __local_idx = __item_id.get_local_id(0);
     auto __group_size = __item_id.get_local_range().size();
@@ -130,7 +130,7 @@ struct __parallel_transform_reduce_sub_group_submitter<__sub_group_size, __iters
                 });
         });
 
-        return __future(__reduce_event, __res);
+        return __res.get_host_access(sycl::read_only)[0];
     }
 }; // struct __parallel_transform_reduce_sub_group_submitter
 
@@ -190,7 +190,7 @@ struct __parallel_transform_reduce_small_submitter<__work_group_size, __iters_pe
                 });
         });
 
-        return __future(__reduce_event, __res);
+        return __res.get_host_access(sycl::read_only)[0];
     }
 }; // struct __parallel_transform_reduce_small_submitter
 
@@ -271,7 +271,7 @@ struct __parallel_transform_reduce_work_group_kernel_submitter<__work_group_size
               oneapi::dpl::__internal::__enable_if_device_execution_policy<_ExecutionPolicy, int> = 0>
     auto
     operator()(_ExecutionPolicy&& __exec, sycl::event& __reduce_event, _Size __n, _ReduceOp __reduce_op,
-               _TransformOp __transform_op, _InitType __init, sycl::buffer<_Tp>& __temp) const
+               _TransformOp __transform_op, _InitType __init, sycl::buffer<_Tp>& __temp, size_t __res_offset) const
     {
         using _NoOpFunctor = unseq_backend::walk_n<_ExecutionPolicy, oneapi::dpl::__internal::__no_op>;
         auto __transform_pattern =
@@ -291,13 +291,10 @@ struct __parallel_transform_reduce_work_group_kernel_submitter<__work_group_size
             }
         }
 
-        sycl::buffer<_Tp> __res(sycl::range<1>(1));
-
         __reduce_event = __exec.queue().submit([&, __n](sycl::handler& __cgh) {
             __cgh.depends_on(__reduce_event);
 
-            sycl::accessor __temp_acc{__temp, __cgh, sycl::read_only};
-            sycl::accessor __res_acc{__res, __cgh, sycl::write_only, __dpl_sycl::__no_init{}};
+            sycl::accessor __temp_acc{__temp, __cgh, sycl::read_write};
             ::std::size_t __local_mem_size = __reduce_pattern.local_mem_req(__work_group_size);
             __dpl_sycl::__local_accessor<_Tp> __temp_local(sycl::range<1>(__local_mem_size), __cgh);
 
@@ -305,11 +302,11 @@ struct __parallel_transform_reduce_work_group_kernel_submitter<__work_group_size
                 sycl::nd_range<1>(sycl::range<1>(__work_group_size2), sycl::range<1>(__work_group_size2)),
                 [=](sycl::nd_item<1> __item_id) {
                     __group_reduce_kernel<_Tp>(__item_id, __n, __transform_pattern, __reduce_pattern, __init,
-                                                    __temp_local, __res_acc, __temp_acc);
+                                                    __temp_local, __temp_acc.get_pointer() + __res_offset, __temp_acc);
                 });
         });
 
-        return __future(__reduce_event, __res);
+        return __temp.get_host_access(sycl::read_only)[__res_offset];
     }
 }; // struct __parallel_transform_reduce_work_group_kernel_submitter
 
@@ -335,7 +332,7 @@ __parallel_transform_reduce_mid_impl(_ExecutionPolicy&& __exec, _Size __n, _Redu
     // number of buffer elements processed within workgroup
     constexpr _Size __size_per_work_group = __iters_per_work_item_device_kernel * __work_group_size;
     const _Size __n_groups = oneapi::dpl::__internal::__dpl_ceiling_div(__n, __size_per_work_group);
-    sycl::buffer<_Tp> __temp{sycl::range<1>(__n_groups)};
+    sycl::buffer<_Tp> __temp{sycl::range<1>(__n_groups + 1)};
 
     sycl::event __reduce_event =
         __parallel_transform_reduce_device_kernel_submitter<__work_group_size, __iters_per_work_item_device_kernel, _Tp,
@@ -345,7 +342,7 @@ __parallel_transform_reduce_mid_impl(_ExecutionPolicy&& __exec, _Size __n, _Redu
     __n = __n_groups; // Number of preliminary results from the device kernel.
     return __parallel_transform_reduce_work_group_kernel_submitter<
         __work_group_size, __iters_per_work_item_work_group_kernel, _Tp, _isComm, _ReduceWorkGroupKernel>()(
-        ::std::forward<_ExecutionPolicy>(__exec), __reduce_event, __n, __reduce_op, __transform_op, __init, __temp);
+        ::std::forward<_ExecutionPolicy>(__exec), __reduce_event, __n, __reduce_op, __transform_op, __init, __temp, __n_groups);
 }
 
 // General implementation using a tree reduction
@@ -456,7 +453,7 @@ struct __parallel_transform_reduce_impl
             __n_groups = oneapi::dpl::__internal::__dpl_ceiling_div(__n, __size_per_work_group);
         } while (__n > 1);
 
-        return __future(__reduce_event, __res);
+        return __res.get_host_access(sycl::read_only)[0];
     }
 }; // struct __parallel_transform_reduce_impl
 
