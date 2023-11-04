@@ -24,8 +24,7 @@ main()
     bool all_passed = true;
     sycl::queue q;
 
-    // for (int logn : {4, 8, 11, 16, 19, 21})
-    for (int logn : {17, 18})
+    for (int logn : {4, 8, 11, 16, 19, 21})
     {
         std::cout << "Testing 2^" << logn << std::endl;
         int n = 1 << logn;
