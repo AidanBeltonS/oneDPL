@@ -135,7 +135,6 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     constexpr int status_flag_padding = 32;
     std::uint32_t status_flags_size = num_wgs + status_flag_padding;
 
-    // One byte flags?
     uint32_t* status_flags = sycl::malloc_device<uint32_t>(status_flags_size, __queue);
     // First status_flags_size elements: partial sums
     // First status_flags_size elements: full results
