@@ -133,7 +133,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     std::size_t num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(num_workloads, wgsize);
 
     constexpr int status_flag_padding = 32;
-    std::uint32_t status_flags_size = num_wgs + 1 + status_flag_padding;
+    std::uint32_t status_flags_size = num_wgs + status_flag_padding;
 
     // One byte flags?
     uint32_t* status_flags = sycl::malloc_device<uint32_t>(status_flags_size, __queue);
