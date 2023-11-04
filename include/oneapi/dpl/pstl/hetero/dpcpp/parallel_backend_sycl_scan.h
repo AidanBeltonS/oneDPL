@@ -16,8 +16,8 @@
 #ifndef _ONEDPL_parallel_backend_sycl_scan_H
 #define _ONEDPL_parallel_backend_sycl_scan_H
 
-#define SCAN_KT_DEBUG 1
-#define INNER_SCAN_KT_DEBUG 1
+#define SCAN_KT_DEBUG 0
+#define INNER_SCAN_KT_DEBUG 0
 
 namespace oneapi::dpl::experimental::kt
 {
@@ -32,7 +32,7 @@ struct __scan_status_flag
     // xxxx10 - full
     // xxx100 - out of bounds
 
-    using _AtomicRefT = sycl::atomic_ref<::std::uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
+    using _AtomicRefT = sycl::atomic_ref<::std::uint32_t, sycl::memory_order::acq_rel, sycl::memory_scope::device,
                                          sycl::access::address_space::global_space>;
     static constexpr std::uint32_t NOT_READY = 0;
     static constexpr std::uint32_t PARTIAL_MASK = 1;
@@ -84,9 +84,7 @@ struct __scan_status_flag
             do
             {
                 flag = tile_atomic.load();
-                // } while (!sycl::all_of_group(subgroup, flag != NOT_READY));
-                // Force to use full_flag. Triggers the bug with more consistency.
-            } while (!sycl::any_of_group(subgroup, flag == FULL_MASK));
+            } while (!sycl::all_of_group(subgroup, flag != NOT_READY));
 
             bool is_full = flag == FULL_MASK;
 
