@@ -27,11 +27,6 @@ inline namespace igpu {
 template<typename _T>
 struct __scan_status_flag
 {
-    // xxxx00 - not computed
-    // xxxx01 - partial
-    // xxxx10 - full
-    // xxx100 - out of bounds
-
     using _AtomicRefT = sycl::atomic_ref<::std::uint32_t, sycl::memory_order::acq_rel, sycl::memory_scope::device,
                                          sycl::access::address_space::global_space>;
     static constexpr std::uint32_t NOT_READY = 0;
@@ -72,11 +67,6 @@ struct __scan_status_flag
         int i = 0;
         int local_id = subgroup.get_local_id();
 
-#if INNER_SCAN_KT_DEBUG
-        int group_id = subgroup.get_group_id();
-        printf("- Lookback(%d, %d, %u)\n", group_id, local_id, tile_id);
-#endif
-
         for (int tile = static_cast<int>(tile_id) + offset; tile >= 0; tile -= 32)
         {
             _AtomicRefT tile_atomic(*(flags_begin + tile + padding - local_id));
@@ -95,27 +85,11 @@ struct __scan_status_flag
             auto lowest_item_with_full = sycl::ctz(is_full_ballot_bits);
 
             size_t contrib_offset = tile + padding - local_id + is_full * num_elements;
-#if INNER_SCAN_KT_DEBUG
-            // printf("  - Inner(%d, %u): is_full %d, flag %d, mask %d\n", local_id, tile_id, is_full, flag, FULL_MASK);
-            // printf("  - Inner(%d, %u): partial_offset = %lu, full_offset %lu, f*n = %lu \n", local_id, tile_id,
-            //        tile + padding - local_id, tile + padding - local_id + num_elements, is_full * num_elements);
-            // printf("  - Inner(%d, %u): tile %u = is_full %d, offset %lu \n", local_id, tile_id, tile, is_full, contrib_offset);
-#endif
-
             _T val = *(sums + contrib_offset);
             _T contribution = local_id <= lowest_item_with_full && (tile - local_id >= 0) ? val : _T{0};
 
-#if INNER_SCAN_KT_DEBUG
-            printf("  - Inner(%d, %d, tile_id = %u): tile %d, curr %d, is_f %d, contrib %d, prev_sum %d \n", group_id,
-                   local_id, tile_id, tile, tile - local_id, is_full, contribution, sum);
-#endif
             // Sum all of the partial results from the tiles found, as well as the full contribution from the closest tile (if any)
             sum += sycl::reduce_over_group(subgroup, contribution, bin_op);
-
-#if INNER_SCAN_KT_DEBUG
-            printf("  - Inner(%d, %d, tile_id = %u): tile %u = after sum %d \n", group_id, local_id, tile_id, tile,
-                   sum);
-#endif
 
             // If we found a full value, we can stop looking at previous tiles. Otherwise,
             // keep going through tiles until we either find a full tile or we've completely
@@ -126,9 +100,6 @@ struct __scan_status_flag
             //if (i++ > 10) break;
         }
 
-#if INNER_SCAN_KT_DEBUG
-        printf("- Lookback(%d, %d, tile_id = %u): final_sum %d \n", group_id, local_id, tile_id, sum);
-#endif
         return sum;
     }
 
@@ -161,14 +132,8 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     std::size_t wgsize = num_workloads > 256 ? 256 : num_workloads;
     std::size_t num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(num_workloads, wgsize);
 
-
     constexpr int status_flag_padding = 32;
-    std::uint32_t status_flags_size = num_wgs+1+status_flag_padding;
-
-#if SCAN_KT_DEBUG
-    printf("launching kernel num_workloads=%lu wgs=%lu wgsize=%lu elems_per_iter=%lu status_flags_size=%u\n",
-           num_workloads, num_wgs, wgsize, __elems_per_workload, status_flags_size);
-#endif
+    std::uint32_t status_flags_size = num_wgs + 1 + status_flag_padding;
 
     // One byte flags?
     uint32_t* status_flags = sycl::malloc_device<uint32_t>(status_flags_size, __queue);
@@ -193,20 +158,6 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
 
     std::uint32_t elems_in_tile = wgsize*__elems_per_workload;
 
-#if SCAN_KT_DEBUG
-    std::vector<uint32_t> debug11v(status_flags_size);
-    __queue.memcpy(debug11v.data(), status_flags, status_flags_size * sizeof(uint32_t));
-
-    for (int i = 0; i < status_flags_size-1; ++i)
-        std::cout << "flag_before " << i << " " << std::bitset<32>(debug11v[i]) << std::endl;
-
-    _Type* debug1 = sycl::malloc_device<_Type>(status_flags_size, __queue);
-    uint32_t* debug2 = sycl::malloc_device<uint32_t>(status_flags_size, __queue);
-    uint32_t* debug3 = sycl::malloc_device<uint32_t>(status_flags_size, __queue);
-    uint32_t* debug4 = sycl::malloc_device<uint32_t>(status_flags_size, __queue);
-    uint32_t* debug5 = sycl::malloc_device<uint32_t>(status_flags_size, __queue);
-#endif
-
     auto event = __queue.submit([&](sycl::handler& hdl) {
         auto tile_id_lacc = sycl::local_accessor<std::uint32_t, 1>(sycl::range<1>{1}, hdl);
         hdl.depends_on(fill_event);
@@ -226,9 +177,6 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
             }
             sycl::group_barrier(group);
             std::uint32_t tile_id = tile_id_lacc[0];
-#if SCAN_KT_DEBUG
-            debug5[group.get_group_linear_id()] = tile_id;
-#endif
 
             auto current_offset = (tile_id*elems_in_tile);
             auto next_offset = ((tile_id+1)*elems_in_tile);
@@ -238,21 +186,10 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
             auto in_end = __in_rng.begin() + next_offset;
             auto out_begin = __out_rng.begin() + current_offset;
 
-
-#if SCAN_KT_DEBUG
-            debug3[tile_id] = current_offset;
-            debug4[tile_id] = next_offset;
-#endif
-
             if (current_offset >= n)
                 return;
 
             auto local_sum = sycl::joint_reduce(group, in_begin, in_end, __binary_op);
-
-#if SCAN_KT_DEBUG
-            debug1[tile_id] = local_sum;
-#endif
-
             _Type prev_sum = 0;
 
             // The first sub-group will query the previous tiles to find a prefix
@@ -265,18 +202,10 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
                     flag.set_partial(local_sum);
 
                 // Find lowest work-item that has a full result (if any) and sum up subsequent partial results to obtain this tile's exclusive sum
-                //sycl::reduce_over_group(item.get_subgroup())
                 prev_sum = flag.cooperative_lookback(tile_id, subgroup, __binary_op, status_flags, sums);
-#if SCAN_KT_DEBUG
-                debug2[tile_id] = prev_sum;
-#endif
 
                 if (group.leader())
                 {
-#if INNER_SCAN_KT_DEBUG
-                    printf("Leader tile_id = %d, prev = %d, local = %d, store = %d \n", tile_id, prev_sum, local_sum,
-                           prev_sum + local_sum);
-#endif
                     flag.set_full(prev_sum + local_sum);
                 }
             }
@@ -287,61 +216,6 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     });
 
     event.wait();
-
-#if SCAN_KT_DEBUG
-    std::vector<_Type> debug1v(status_flags_size);
-    std::vector<uint32_t> debug2v(status_flags_size);
-    std::vector<uint32_t> debug3v(status_flags_size);
-    std::vector<uint32_t> debug4v(status_flags_size);
-    std::vector<uint32_t> debug5v(status_flags_size);
-    std::vector<uint32_t> debug6v(status_flags_size);
-    std::vector<_Type> debug7v(2 * status_flags_size);
-    __queue.memcpy(debug1v.data(), debug1, status_flags_size * sizeof(_Type));
-    __queue.memcpy(debug2v.data(), debug2, status_flags_size * sizeof(uint32_t));
-    __queue.memcpy(debug3v.data(), debug3, status_flags_size * sizeof(uint32_t));
-    __queue.memcpy(debug4v.data(), debug4, status_flags_size * sizeof(uint32_t));
-    __queue.memcpy(debug5v.data(), debug5, status_flags_size * sizeof(uint32_t));
-    __queue.memcpy(debug6v.data(), status_flags, status_flags_size * sizeof(uint32_t));
-    __queue.memcpy(debug7v.data(), sums, 2 * status_flags_size * sizeof(_Type));
-    __queue.wait();
-
-    auto size = status_flags_size - 1;
-    for (int i = 0; i < size; ++i)
-        std::cout << "tile " << i << " " << debug5v[i] << std::endl;
-    for (int i = 0; i < size; ++i)
-        std::cout << "local_sum " << i << " " << debug1v[i] << std::endl;
-    for (int i = 0; i < size; ++i)
-    {
-        std::cout << "partial sums " << i << " " << debug7v[i] << std::endl;
-    }
-    for (int i = 0; i < size; ++i)
-    {
-        std::cout << "full sums " << i + status_flags_size << " " << debug7v[i + status_flags_size] << std::endl;
-    }
-
-    for (int i = 0; i < status_flags_size-1; ++i)
-    {
-        auto val = debug6v[i] == __scan_status_flag<_Type>::FULL_MASK ? debug7v[i + status_flags_size] : debug7v[i];
-        int a = val / elems_in_tile;
-        int b = val % elems_in_tile;
-        auto expected_val = (i - 32 + 1) * 2048;
-        auto is_correct_val = (i - 32 >= 0) && (expected_val != val);
-        std::cout << "flags " << i << " tile_id = " << i - 32 << " " << std::bitset<4>(debug6v[i]) << " (" << val
-                  << " = " << a << "/" << elems_in_tile << "+" << b << ") "
-                  << "Expected " << expected_val << (is_correct_val ? " FAILED " : "") << std::endl;
-    }
-    for (int i = 0; i < status_flags_size-1; ++i)
-        std::cout << "lookback " << i << " " << debug2v[i] << std::endl;
-    for (int i = 0; i < status_flags_size-1; ++i)
-        std::cout << "offset " << i << " " << debug3v[i] << std::endl;
-    for (int i = 0; i < status_flags_size-1; ++i)
-        std::cout << "end " << i << " " << debug4v[i] << std::endl;
-    sycl::free(debug1, __queue);
-    sycl::free(debug2, __queue);
-    sycl::free(debug3, __queue);
-    sycl::free(debug4, __queue);
-    sycl::free(debug5, __queue);
-#endif
 
     sycl::free(status_flags, __queue);
     sycl::free(sums, __queue);
@@ -362,16 +236,6 @@ single_pass_inclusive_scan(sycl::queue __queue, _InIterator __in_begin, _InItera
 {
     auto __n = __in_end - __in_begin;
 
-#if SCAN_KT_DEBUG
-    using _Type = std::remove_pointer_t<_InIterator>;
-    std::vector<_Type> in_debug(__n);
-    __queue.memcpy(in_debug.data(), __in_begin, __n * sizeof(_Type));
-
-    // for (int i = 0; i < __n; ++i)
-    //     std::cout << "input_before " << i << " " << in_debug[i] << std::endl;
-#endif
-
-    //printf("KERNEL_TEMPLATE %lu\n", __n);
     auto __keep1 =
         oneapi::dpl::__ranges::__get_sycl_range<__par_backend_hetero::access_mode::read, _InIterator>();
     auto __buf1 = __keep1(__in_begin, __in_end);
@@ -380,16 +244,6 @@ single_pass_inclusive_scan(sycl::queue __queue, _InIterator __in_begin, _InItera
     auto __buf2 = __keep2(__out_begin, __out_begin + __n);
 
     single_pass_scan_impl<_KernelParam, true>(__queue, __buf1.all_view(), __buf2.all_view(), __binary_op);
-
-#if SCAN_KT_DEBUG
-    std::vector<_Type> in_debug2(__n);
-    __queue.memcpy(in_debug2.data(), __in_begin, __n * sizeof(_Type));
-
-    // for (int i = 0; i < __n; ++i)
-    //     std::cout << "input_after " << i << " " << in_debug2[i] << std::endl;
-#endif
-
-    //printf("KERNEL_TEMPLATE DONE %lu\n", __n);
 }
 
 } // inline namespace igpu
