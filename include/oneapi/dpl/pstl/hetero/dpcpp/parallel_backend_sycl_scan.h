@@ -21,6 +21,8 @@ namespace oneapi::dpl::experimental::kt
 
 inline namespace igpu {
 
+constexpr size_t SUBGROUP_SIZE = 32;
+
 template<typename _T>
 struct __scan_status_flag
 {
@@ -31,15 +33,15 @@ struct __scan_status_flag
     static constexpr std::uint32_t FULL_MASK = 2;
     static constexpr std::uint32_t OUT_OF_BOUNDS = 4;
 
-    static constexpr int padding = 32;
+    static constexpr int padding = SUBGROUP_SIZE;
 
-    __scan_status_flag(std::uint32_t* flags_begin, const std::uint32_t tile_id, _T* sums, size_t num_elements)
-        : atomic_flag(*(flags_begin + tile_id + padding)), scanned_partial_value(sums + tile_id + padding),
-          scanned_full_value(sums + tile_id + padding + num_elements), num_elements{num_elements}
+    __scan_status_flag(const std::uint32_t tile_id, std::uint32_t* flags_begin, _T* tile_sums,
+                       size_t num_elements)
+        : atomic_flag(*(flags_begin + tile_id + padding)), scanned_partial_value(tile_sums + tile_id + padding),
+          scanned_full_value(tile_sums + tile_id + padding + num_elements), num_elements{num_elements}
     {
     }
 
-    // Change
     void
     set_partial(_T val)
     {
@@ -57,21 +59,21 @@ struct __scan_status_flag
     template <typename _Subgroup, typename BinOp>
     _T
     cooperative_lookback(std::uint32_t tile_id, const _Subgroup& subgroup, BinOp bin_op, std::uint32_t* flags_begin,
-                         _T* sums)
+                         _T* tile_sums)
     {
-        _T sum = 0;
+        _T acc = 0;
         int offset = -1;
         int i = 0;
         int local_id = subgroup.get_local_id();
 
-        for (int tile = static_cast<int>(tile_id) + offset; tile >= 0; tile -= 32)
+        for (int tile = static_cast<int>(tile_id) + offset; tile >= 0; tile -= SUBGROUP_SIZE)
         {
             _AtomicRefT tile_atomic(*(flags_begin + tile + padding - local_id));
-            std::uint32_t flag = NOT_READY;
+            std::uint32_t flag;
             do
             {
                 flag = tile_atomic.load();
-            } while (!sycl::all_of_group(subgroup, flag != NOT_READY));
+            } while (!sycl::all_of_group(subgroup, flag != NOT_READY)); // Loop till all ready
 
             bool is_full = flag == FULL_MASK;
 
@@ -81,12 +83,16 @@ struct __scan_status_flag
 
             auto lowest_item_with_full = sycl::ctz(is_full_ballot_bits);
 
+            // The partial scan results and the full scan sum values are in contiguous memory.
+            // Each section of the memory is of size num_elements.
+            // The partial sum for a tile is at [i] and the full sum is at [i + num_elements]
+            // is_full * num_elements allows to select between the two values without branching the code.
             size_t contrib_offset = tile + padding - local_id + is_full * num_elements;
-            _T val = *(sums + contrib_offset);
+            _T val = *(tile_sums + contrib_offset);
             _T contribution = local_id <= lowest_item_with_full && (tile - local_id >= 0) ? val : _T{0};
 
             // Sum all of the partial results from the tiles found, as well as the full contribution from the closest tile (if any)
-            sum += sycl::reduce_over_group(subgroup, contribution, bin_op);
+            acc += sycl::reduce_over_group(subgroup, contribution, bin_op);
 
             // If we found a full value, we can stop looking at previous tiles. Otherwise,
             // keep going through tiles until we either find a full tile or we've completely
@@ -94,10 +100,9 @@ struct __scan_status_flag
             if (is_full_ballot_bits)
                 break;
 
-            //if (i++ > 10) break;
         }
 
-        return sum;
+        return acc;
     }
 
     _AtomicRefT atomic_flag;
@@ -129,28 +134,22 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     std::size_t wgsize = num_workloads > 256 ? 256 : num_workloads;
     std::size_t num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(num_workloads, wgsize);
 
-    constexpr int status_flag_padding = 32;
-    std::uint32_t status_flags_size = num_wgs + status_flag_padding;
+    constexpr int status_flag_padding = SUBGROUP_SIZE;
+    std::uint32_t status_flags_size = num_wgs + status_flag_padding + 1;
+    std::uint32_t tile_sums_size = num_wgs + status_flag_padding;
 
     uint32_t* status_flags = sycl::malloc_device<uint32_t>(status_flags_size, __queue);
-    // First status_flags_size elements: partial sums of each workgroup
-    // First status_flags_size elements: full results / full sums, i.e. sum of the previous and current workgroup's partial sums
-    _Type* sums = sycl::malloc_device<_Type>(status_flags_size * 2, __queue);
+    // First status_flags_size elements: partial scanned values (using _BinaryOp) of each workgroup
+    // Second status_flags_size elements: full scanned values, i.e. sum of the previous and current workgroup's partial sums
+    _Type* tile_sums = sycl::malloc_device<_Type>(tile_sums_size * 2, __queue);
 
     auto fill_event = __queue.submit([&](sycl::handler& hdl) {
         hdl.parallel_for<class scan_kt_init>(sycl::range<1>{status_flags_size}, [=](const sycl::item<1>& item)  {
                 int id = item.get_linear_id();
-                status_flags[id] = id < status_flag_padding ? __scan_status_flag<_Type>::OUT_OF_BOUNDS : 0;
+                status_flags[id] = id < status_flag_padding ? __scan_status_flag<_Type>::OUT_OF_BOUNDS
+                                                            : __scan_status_flag<_Type>::NOT_READY;
         });
     });
-    fill_event = __queue.submit([&](sycl::handler& hdl) {
-        hdl.parallel_for(sycl::range<1>{status_flags_size}, [=](const sycl::item<1>& item) {
-            int id = item.get_linear_id();
-            sums[id] = id;
-            sums[id + status_flags_size] = id;
-        });
-    });
-    __queue.wait();
 
     std::uint32_t elems_in_tile = wgsize*__elems_per_workload;
 
@@ -191,14 +190,13 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
             // The first sub-group will query the previous tiles to find a prefix
             if (subgroup.get_group_id() == 0)
             {
-                __scan_status_flag<_Type> flag(status_flags, tile_id, sums, status_flags_size);
+                __scan_status_flag<_Type> flag(tile_id, status_flags, tile_sums, status_flags_size);
 
-                // Modify this to separate value (local_sum) from flag.
                 if (group.leader())
                     flag.set_partial(local_sum);
 
                 // Find lowest work-item that has a full result (if any) and sum up subsequent partial results to obtain this tile's exclusive sum
-                prev_sum = flag.cooperative_lookback(tile_id, subgroup, __binary_op, status_flags, sums);
+                prev_sum = flag.cooperative_lookback(tile_id, subgroup, __binary_op, status_flags, tile_sums);
 
                 if (group.leader())
                     flag.set_full(prev_sum + local_sum);
@@ -212,7 +210,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     event.wait();
 
     sycl::free(status_flags, __queue);
-    sycl::free(sums, __queue);
+    sycl::free(tile_sums, __queue);
 }
 
 // The generic structure for configuring a kernel
