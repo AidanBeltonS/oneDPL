@@ -122,17 +122,17 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
 
     const ::std::size_t n = __in_rng.size();
 #ifdef _ONEDPL_SCAN_ITER_SIZE
-    constexpr ::std::size_t __elems_per_workload = _ONEDPL_SCAN_ITER_SIZE;
+    constexpr ::std::size_t __elems_per_workitem = _ONEDPL_SCAN_ITER_SIZE;
 #else
-    constexpr ::std::size_t __elems_per_workload = 8;
+    constexpr ::std::size_t __elems_per_workitem = 8;
 #endif
     // Next power of 2 greater than or equal to __n
     auto __n_uniform = n;
     if ((__n_uniform & (__n_uniform - 1)) != 0)
         __n_uniform = oneapi::dpl::__internal::__dpl_bit_floor(n) << 1;
-    std::size_t num_workloads = __n_uniform / __elems_per_workload;
-    std::size_t wgsize = num_workloads > 256 ? 256 : num_workloads;
-    std::size_t num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(num_workloads, wgsize);
+    std::size_t num_workitems = __n_uniform / __elems_per_workitem;
+    std::size_t wgsize = num_workitems > 256 ? 256 : num_workitems;
+    std::size_t num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(num_workitems, wgsize);
 
     constexpr int status_flag_padding = SUBGROUP_SIZE;
     std::uint32_t status_flags_size = num_wgs + status_flag_padding + 1;
@@ -151,14 +151,14 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
         });
     });
 
-    std::uint32_t elems_in_tile = wgsize*__elems_per_workload;
+    std::uint32_t elems_in_tile = wgsize*__elems_per_workitem;
 
     auto event = __queue.submit([&](sycl::handler& hdl) {
         auto tile_id_lacc = sycl::local_accessor<std::uint32_t, 1>(sycl::range<1>{1}, hdl);
         hdl.depends_on(fill_event);
 
         oneapi::dpl::__ranges::__require_access(hdl, __in_rng, __out_rng);
-        hdl.parallel_for<class scan_kt_main>(sycl::nd_range<1>(num_workloads, wgsize), [=](const sycl::nd_item<1>& item)  [[intel::reqd_sub_group_size(32)]] {
+        hdl.parallel_for<class scan_kt_main>(sycl::nd_range<1>(num_workitems, wgsize), [=](const sycl::nd_item<1>& item)  [[intel::reqd_sub_group_size(32)]] {
             auto group = item.get_group();
             auto subgroup = item.get_sub_group();
 
