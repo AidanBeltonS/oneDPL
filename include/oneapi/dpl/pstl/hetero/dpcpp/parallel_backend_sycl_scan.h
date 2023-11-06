@@ -16,9 +16,6 @@
 #ifndef _ONEDPL_parallel_backend_sycl_scan_H
 #define _ONEDPL_parallel_backend_sycl_scan_H
 
-#define SCAN_KT_DEBUG 0
-#define INNER_SCAN_KT_DEBUG 0
-
 namespace oneapi::dpl::experimental::kt
 {
 
@@ -136,8 +133,8 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     std::uint32_t status_flags_size = num_wgs + status_flag_padding;
 
     uint32_t* status_flags = sycl::malloc_device<uint32_t>(status_flags_size, __queue);
-    // First status_flags_size elements: partial sums
-    // First status_flags_size elements: full results
+    // First status_flags_size elements: partial sums of each workgroup
+    // First status_flags_size elements: full results / full sums, i.e. sum of the previous and current workgroup's partial sums
     _Type* sums = sycl::malloc_device<_Type>(status_flags_size * 2, __queue);
 
     auto fill_event = __queue.submit([&](sycl::handler& hdl) {
@@ -204,9 +201,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
                 prev_sum = flag.cooperative_lookback(tile_id, subgroup, __binary_op, status_flags, sums);
 
                 if (group.leader())
-                {
                     flag.set_full(prev_sum + local_sum);
-                }
             }
 
             prev_sum = sycl::group_broadcast(group, prev_sum, 0);
