@@ -61,7 +61,7 @@ struct __scan_status_flag
     cooperative_lookback(std::uint32_t tile_id, const _Subgroup& subgroup, BinOp bin_op, std::uint32_t* flags_begin,
                          _T* tile_sums)
     {
-        _T acc = 0;
+        _T sum = 0;
         int offset = -1;
         int i = 0;
         int local_id = subgroup.get_local_id();
@@ -92,7 +92,7 @@ struct __scan_status_flag
             _T contribution = local_id <= lowest_item_with_full && (tile - local_id >= 0) ? val : _T{0};
 
             // Sum all of the partial results from the tiles found, as well as the full contribution from the closest tile (if any)
-            acc += sycl::reduce_over_group(subgroup, contribution, bin_op);
+            sum += sycl::reduce_over_group(subgroup, contribution, bin_op);
 
             // If we found a full value, we can stop looking at previous tiles. Otherwise,
             // keep going through tiles until we either find a full tile or we've completely
@@ -102,7 +102,7 @@ struct __scan_status_flag
 
         }
 
-        return acc;
+        return sum;
     }
 
     _AtomicRefT atomic_flag;
