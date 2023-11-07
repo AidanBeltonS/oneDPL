@@ -158,7 +158,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
         hdl.depends_on(fill_event);
 
         oneapi::dpl::__ranges::__require_access(hdl, __in_rng, __out_rng);
-        hdl.parallel_for<class scan_kt_main>(sycl::nd_range<1>(num_workitems, wgsize), [=](const sycl::nd_item<1>& item)  [[intel::reqd_sub_group_size(32)]] {
+        hdl.parallel_for<class scan_kt_main>(sycl::nd_range<1>(num_workitems, wgsize), [=](const sycl::nd_item<1>& item)  [[intel::reqd_sub_group_size(SUBGROUP_SIZE)]] {
             auto group = item.get_group();
             auto subgroup = item.get_sub_group();
 
