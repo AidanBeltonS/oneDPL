@@ -118,8 +118,8 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
 
     const ::std::size_t n = __in_rng.size();
 
-    constexpr ::std::size_t wgsize = _KernelParam::__workgroup_size;
-    constexpr ::std::size_t elems_per_workitem = _KernelParam::__elems_per_workitem;
+    constexpr ::std::size_t wgsize = _KernelParam::workgroup_size;
+    constexpr ::std::size_t elems_per_workitem = _KernelParam::elems_per_workitem;
 
     // Avoid non_uniform n by padding up to a multiple of wgsize
     ::std::size_t num_workitems = n / elems_per_workitem;
@@ -207,12 +207,12 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
 }
 
 // The generic structure for configuring a kernel
-template <std::uint16_t _ElemsPerWorkItem, std::uint16_t _WorkGroupSize, typename _KernelName>
+template <std::uint16_t ElemsPerWorkItem, std::uint16_t WorkGroupSize, typename KernelName>
 struct kernel_param
 {
-    static constexpr std::uint16_t __elems_per_workitem = _ElemsPerWorkItem;
-    static constexpr std::uint16_t __workgroup_size = _WorkGroupSize;
-    using __kernel_name = _KernelName;
+    static constexpr std::uint16_t elems_per_workitem = ElemsPerWorkItem;
+    static constexpr std::uint16_t workgroup_size = WorkGroupSize;
+    using kernel_name = KernelName;
 };
 
 template <typename _KernelParam, typename _InIterator, typename _OutIterator, typename _BinaryOp>
