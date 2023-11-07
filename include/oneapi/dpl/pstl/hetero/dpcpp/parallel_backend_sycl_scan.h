@@ -126,8 +126,8 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     num_workitems = num_workitems + wgsize - 1;
     num_workitems -= (num_workitems % wgsize);
 
-    ::std::size_t num_wgs = num_workitems / wgsize;
     std::uint32_t elems_in_tile = wgsize * elems_per_workitem;
+    ::std::size_t num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(n, elems_in_tile);
 
     constexpr int status_flag_padding = SUBGROUP_SIZE;
     std::uint32_t status_flags_size = num_wgs + status_flag_padding + 1;
@@ -207,11 +207,11 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
 }
 
 // The generic structure for configuring a kernel
-template <std::uint16_t _WorkGroupSize, std::uint16_t _ElemsPerWorkItem, typename _KernelName>
+template <std::uint16_t _ElemsPerWorkItem, std::uint16_t _WorkGroupSize, typename _KernelName>
 struct kernel_param
 {
-    static constexpr std::uint16_t __workgroup_size = _WorkGroupSize;
     static constexpr std::uint16_t __elems_per_workitem = _ElemsPerWorkItem;
+    static constexpr std::uint16_t __workgroup_size = _WorkGroupSize;
     using __kernel_name = _KernelName;
 };
 
