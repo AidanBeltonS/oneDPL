@@ -217,8 +217,7 @@ struct kernel_param
 
 template <typename _KernelParam, typename _InIterator, typename _OutIterator, typename _BinaryOp>
 void
-single_pass_inclusive_scan(sycl::queue __queue, _InIterator __in_begin, _InIterator __in_end, _OutIterator __out_begin,
-                           _BinaryOp __binary_op)
+single_pass_inclusive_scan(sycl::queue __queue, _InIterator __in_begin, _InIterator __in_end, _OutIterator __out_begin, _BinaryOp __binary_op)
 {
     auto __n = __in_end - __in_begin;
 
