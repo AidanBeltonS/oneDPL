@@ -122,12 +122,9 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     constexpr ::std::size_t elems_per_workitem = _KernelParam::elems_per_workitem;
 
     // Avoid non_uniform n by padding up to a multiple of wgsize
-    ::std::size_t num_workitems = n / elems_per_workitem;
-    num_workitems = num_workitems + wgsize - 1;
-    num_workitems -= (num_workitems % wgsize);
-
     std::uint32_t elems_in_tile = wgsize * elems_per_workitem;
     ::std::size_t num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(n, elems_in_tile);
+    ::std::size_t num_workitems = num_wgs * wgsize;
 
     constexpr int status_flag_padding = SUBGROUP_SIZE;
     std::uint32_t status_flags_size = num_wgs + status_flag_padding + 1;
