@@ -133,7 +133,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     std::size_t tile_sums_elems = num_wgs + status_flag_padding;
     std::size_t tile_sums_size = status_flags_elems * sizeof(_Type);
 
-    std::size_t extra_mem_for_aligment = status_flags_size % alignof(_Type);
+    std::size_t extra_mem_for_aligment = alignof(_Type) - (status_flags_size % alignof(_Type));
     // status_flags_size for the status_flags
     // extra_mem_for_aligment of the datatype _Type
     // First tile_sums_size partial scanned values
