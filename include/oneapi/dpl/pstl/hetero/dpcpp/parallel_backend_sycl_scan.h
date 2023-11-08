@@ -215,7 +215,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
             hdl.host_task([=](){ sycl::free(mem_pool, __queue); });
         });
 
-    free_event.wait();
+    event.wait();
 }
 
 // The generic structure for configuring a kernel
