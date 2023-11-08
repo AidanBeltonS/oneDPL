@@ -36,8 +36,7 @@ struct __scan_status_flag
     static constexpr int padding = SUBGROUP_SIZE;
 
     __scan_status_flag(const std::uint32_t tile_id, std::uint32_t* flags_begin, _T* tile_sums, size_t num_elements)
-        : flags_begin(flags_begin), tile_sums(tile_sums), atomic_flag(*(flags_begin + tile_id + padding)),
-          scanned_partial_value(tile_sums + tile_id + padding),
+        : atomic_flag(*(flags_begin + tile_id + padding)), scanned_partial_value(tile_sums + tile_id + padding),
           scanned_full_value(tile_sums + tile_id + padding + num_elements), num_elements{num_elements}
     {
     }
@@ -58,7 +57,8 @@ struct __scan_status_flag
 
     template <typename _Subgroup, typename BinOp>
     _T
-    cooperative_lookback(std::uint32_t tile_id, const _Subgroup& subgroup, BinOp bin_op)
+    cooperative_lookback(std::uint32_t tile_id, const _Subgroup& subgroup, BinOp bin_op, std::uint32_t* flags_begin,
+                         _T* tile_sums)
     {
         _T sum = 0;
         int offset = -1;
@@ -199,7 +199,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
                     flag.set_partial(local_sum);
 
                 // Find lowest work-item that has a full result (if any) and sum up subsequent partial results to obtain this tile's exclusive sum
-                prev_sum = flag.cooperative_lookback(tile_id, subgroup, __binary_op);
+                prev_sum = flag.cooperative_lookback(tile_id, subgroup, __binary_op, status_flags, tile_sums);
 
                 if (group.leader())
                     flag.set_full(prev_sum + local_sum);
