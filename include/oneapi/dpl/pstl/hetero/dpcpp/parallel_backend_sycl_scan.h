@@ -35,7 +35,8 @@ struct __scan_status_flag
 
     static constexpr int padding = SUBGROUP_SIZE;
 
-    __scan_status_flag(const std::uint32_t tile_id, std::uint32_t* flags_begin, _T* tile_sums, size_t num_elements)
+    __scan_status_flag(const std::uint32_t tile_id, std::uint32_t* flags_begin, _T* tile_sums,
+                       size_t num_elements)
         : atomic_flag(*(flags_begin + tile_id + padding)), scanned_partial_value(tile_sums + tile_id + padding),
           scanned_full_value(tile_sums + tile_id + padding + num_elements), num_elements{num_elements}
     {
@@ -99,9 +100,6 @@ struct __scan_status_flag
 
         return sum;
     }
-
-    std::uint32_t* flags_begin;
-    _T* tile_sums;
 
     _AtomicRefT atomic_flag;
     _T* scanned_partial_value;
