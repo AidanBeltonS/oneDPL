@@ -211,10 +211,10 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     });
 
     __queue.submit(
-        [&](sycl::handler& hdl)
+        [=](sycl::handler& hdl)
         {
             hdl.depends_on(event);
-            hdl.host_task([&](){ sycl::free(mem_pool, __queue); });
+            hdl.host_task([=](){ sycl::free(mem_pool, __queue); });
         });
 }
 
