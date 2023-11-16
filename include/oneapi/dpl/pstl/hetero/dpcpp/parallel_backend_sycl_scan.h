@@ -108,7 +108,7 @@ struct scan_memory
     }
 
     static _AtomicT
-    load_counter(::std::size_t num_wgs, char* scratch)
+    fetch_add_counter(::std::size_t num_wgs, char* scratch)
     {
         ::std::size_t num_elements = padding + num_wgs;
         _AtomicCounterRefT tile_counter(*(reinterpret_cast<_AtomicT*>(scratch) + num_elements));
@@ -251,7 +251,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
             // Obtain unique ID for this work-group that will be used in decoupled lookback
             if (group.leader())
             {
-                tile_id_lacc[0] = scan_memory<_Type>::load_counter(num_wgs, scratch);
+                tile_id_lacc[0] = scan_memory<_Type>::fetch_add_counter(num_wgs, scratch);
             }
             sycl::group_barrier(group);
             std::uint32_t tile_id = tile_id_lacc[0];
