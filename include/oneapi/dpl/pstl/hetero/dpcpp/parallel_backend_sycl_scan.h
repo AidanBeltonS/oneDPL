@@ -216,7 +216,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
 
     char* scratch = scan_memory<_Type>::allocate_memory(num_wgs, __queue);
 
-    // FIX: can we get rid of this section, i.e. hide the dynamic_tile_id_counter, hide initialization details
+    // TODO: can we get rid of this section, i.e. hide the dynamic_tile_id_counter, hide initialization details
     ::std::size_t status_flags_elems = scan_memory<_Type>::get_num_elements(num_wgs) + 1;
     ::std::size_t fill_num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(status_flags_elems, wgsize);
     using AtomicT = typename scan_memory<_Type>::_AtomicT;
