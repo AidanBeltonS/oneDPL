@@ -29,28 +29,28 @@ constexpr ::std::size_t SUBGROUP_SIZE = 32;
 template <typename _T>
 struct scan_memory
 {
-    using _AtomicT = ::std::uint32_t;
-    using _AtomicRefT = sycl::atomic_ref<_AtomicT, sycl::memory_order::acq_rel, sycl::memory_scope::device,
-                                         sycl::access::address_space::global_space>;
-    using _AtomicCounterRefT = sycl::atomic_ref<_AtomicT, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                                                sycl::access::address_space::global_space>;
+    using _FlagT = ::std::uint32_t;
+    using _AtomicFlagRefT = sycl::atomic_ref<_FlagT, sycl::memory_order::acq_rel, sycl::memory_scope::device,
+                                             sycl::access::address_space::global_space>;
 
-    static constexpr _AtomicT NOT_READY = 0;
-    static constexpr _AtomicT PARTIAL_MASK = 1;
-    static constexpr _AtomicT FULL_MASK = 2;
-    static constexpr _AtomicT OUT_OF_BOUNDS = 4;
+    static constexpr _FlagT NOT_READY = 0;
+    static constexpr _FlagT PARTIAL_MASK = 1;
+    static constexpr _FlagT FULL_MASK = 2;
+    static constexpr _FlagT OUT_OF_BOUNDS = 4;
 
     static constexpr ::std::size_t padding = SUBGROUP_SIZE;
 
-    scan_memory(::std::size_t tile_id, char* scratch, ::std::size_t num_wgs)
-        : atomic_flag(*(reinterpret_cast<_AtomicT*>(scratch) + tile_id + padding)), scratch(scratch),
+    scan_memory(::std::size_t tile_id, ::std::uint8_t* scratch, ::std::size_t num_wgs)
+        : atomic_flag(*(reinterpret_cast<_FlagT*>(scratch) + tile_id + padding)),
           num_elements(get_num_elements(num_wgs))
     {
-        ::std::size_t atomic_bytes = (num_elements + 1) * sizeof(_AtomicT);
-        ::std::size_t align_extra_mem = alignof(_T) - (atomic_bytes % alignof(_T));
+      // TODO: +1 belongs to dynamic tile_id counter, which is in the middle of the scratch
+      // Remove that.
+        ::std::size_t flag_bytes = (num_elements + 1) * sizeof(_FlagT);
+        ::std::size_t align_extra_mem = alignof(_T) - (flag_bytes % alignof(_T));
 
-        flags = reinterpret_cast<_AtomicT*>(scratch);
-        tile_values = reinterpret_cast<_T*>(scratch + atomic_bytes + align_extra_mem);
+        flags = reinterpret_cast<_FlagT*>(scratch);
+        tile_values = reinterpret_cast<_T*>(scratch + flag_bytes + align_extra_mem);
 
         scanned_partial_value = tile_values + tile_id + padding;
         scanned_full_value = tile_values + tile_id + padding + num_elements;
@@ -70,50 +70,30 @@ struct scan_memory
         atomic_flag.store(FULL_MASK);
     }
 
-    _AtomicT
+    _FlagT
     load_flag(::std::size_t tile_id) const
     {
-        _AtomicRefT flag(*(flags + tile_id + padding));
+        _AtomicFlagRefT flag(*(flags + tile_id + padding));
         return flag.load();
     }
 
     _T
-    get_value(::std::size_t tile_id, _AtomicT flag) const
+    get_value(::std::size_t tile_id, _FlagT flag) const
     {
         ::std::size_t offset = tile_id + padding + num_elements * is_full(flag);
         return tile_values[offset];
     }
 
-    static char*
-    allocate_memory(::std::size_t num_wgs, sycl::queue queue)
+    static ::std::size_t
+    get_memory_size(::std::size_t num_wgs)
     {
         ::std::size_t num_elements = padding + num_wgs;
-        ::std::size_t atomic_bytes = (num_elements + 1) * sizeof(_AtomicT);
+        ::std::size_t atomic_bytes = num_elements * sizeof(_FlagT);
         ::std::size_t align_extra_mem = alignof(_T) - (atomic_bytes % alignof(_T));
         ::std::size_t tile_sums_bytes = (2 * num_elements) * sizeof(_T);
         ::std::size_t memory_size = atomic_bytes + align_extra_mem + tile_sums_bytes;
 
-        return sycl::malloc_device<char>(memory_size, queue);
-    }
-
-    static sycl::event
-    async_free(char* scratch, sycl::queue& queue, sycl::event& dependencies)
-    {
-        return queue.submit(
-            [=](sycl::handler& hdl)
-            {
-                hdl.depends_on(dependencies);
-                hdl.host_task([=]() { sycl::free(scratch, queue); });
-            });
-    }
-
-    static _AtomicT
-    fetch_add_counter(::std::size_t num_wgs, char* scratch)
-    {
-        ::std::size_t num_elements = padding + num_wgs;
-        _AtomicCounterRefT tile_counter(*(reinterpret_cast<_AtomicT*>(scratch) + num_elements));
-
-        return tile_counter.fetch_add(1);
+        return memory_size;
     }
 
     static ::std::size_t
@@ -123,31 +103,56 @@ struct scan_memory
     }
 
     static bool
-    is_ready(_AtomicT flag)
+    is_ready(_FlagT flag)
     {
         return flag != NOT_READY;
     }
 
     static bool
-    is_full(_AtomicT flag)
+    is_full(_FlagT flag)
     {
         return flag == FULL_MASK;
     }
 
     static bool
-    is_out_of_bounds(_AtomicT flag)
+    is_out_of_bounds(_FlagT flag)
     {
         return flag == OUT_OF_BOUNDS;
     }
 
-    _AtomicRefT atomic_flag;
+    _AtomicFlagRefT atomic_flag;
     _T* scanned_partial_value;
     _T* scanned_full_value;
 
     ::std::size_t num_elements;
-    char* scratch;
-    _AtomicT* flags;
+    _FlagT* flags;
     _T* tile_values;
+};
+
+struct TileId
+{
+    using _TileIdT = ::std::uint32_t;
+    using _AtomicTileRefT = sycl::atomic_ref<_TileIdT, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                             sycl::access::address_space::global_space>;
+
+    TileId(::std::uint8_t* scratch, ::std::size_t offset_bytes)
+        : tile_counter(*(reinterpret_cast<_TileIdT*>(scratch + offset_bytes)))
+    {
+    }
+
+    static ::std::size_t
+    get_memory_size()
+    {
+        return 1 * sizeof(_TileIdT);
+    }
+
+    _TileIdT
+    fetch_inc()
+    {
+        return tile_counter.fetch_add(1);
+    }
+
+    _AtomicTileRefT tile_counter;
 };
 
 struct cooperative_lookback
@@ -157,7 +162,7 @@ struct cooperative_lookback
     _T
     operator()(std::uint32_t tile_id, const _Subgroup& subgroup, BinOp bin_op, scan_memory<_T> memory)
     {
-        using AtomicT = typename scan_memory<_T>::_AtomicT;
+        using FlagT = typename scan_memory<_T>::_FlagT;
 
         _T sum = 0;
         int offset = -1;
@@ -166,7 +171,7 @@ struct cooperative_lookback
 
         for (int tile = static_cast<int>(tile_id) + offset; tile >= 0; tile -= SUBGROUP_SIZE)
         {
-            AtomicT flag;
+            FlagT flag;
             do
             {
                 flag = memory.load_flag(tile - local_id);
@@ -214,13 +219,16 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     ::std::size_t num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(n, elems_in_tile);
     ::std::size_t num_workitems = num_wgs * wgsize;
 
-    char* scratch = scan_memory<_Type>::allocate_memory(num_wgs, __queue);
+    // TODO: Remove Dynamic Tile Counter from the middle of the scratch
+    // Probably the best way is to have in memory: Values, Flags, Acc. Align memory.
+    // Right Now -> Assumes TileId::TileIdT and scan_memory<_Type>::FlagT are the same type
+    ::std::size_t mem_size_bytes = scan_memory<_Type>::get_memory_size(num_wgs) + TileId::get_memory_size();
+    ::std::uint8_t* scratch = sycl::malloc_device<::std::uint8_t>(mem_size_bytes, __queue);
 
-    // TODO: can we get rid of this section, i.e. hide the dynamic_tile_id_counter, hide initialization details
-    ::std::size_t status_flags_elems = scan_memory<_Type>::get_num_elements(num_wgs) + 1;
-    ::std::size_t fill_num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(status_flags_elems, wgsize);
-    using AtomicT = typename scan_memory<_Type>::_AtomicT;
-    AtomicT* status_flags = reinterpret_cast<AtomicT*>(scratch);
+    ::std::size_t init_elements = scan_memory<_Type>::get_num_elements(num_wgs) + 1;
+    ::std::size_t fill_num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(init_elements, wgsize);
+    using FlagT = typename scan_memory<_Type>::_FlagT;
+    FlagT* status_flags_and_counter = reinterpret_cast<FlagT*>(scratch);
 
     auto fill_event = __queue.submit(
         [&](sycl::handler& hdl)
@@ -229,10 +237,11 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
                                                  [=](const sycl::nd_item<1>& item)
                                                  {
                                                      int id = item.get_global_linear_id();
-                                                     if (id < status_flags_elems)
-                                                         status_flags[id] = id < scan_memory<_Type>::padding
-                                                                                ? scan_memory<_Type>::OUT_OF_BOUNDS
-                                                                                : scan_memory<_Type>::NOT_READY;
+                                                     if (id < init_elements)
+                                                         status_flags_and_counter[id] =
+                                                             id < scan_memory<_Type>::padding
+                                                                 ? scan_memory<_Type>::OUT_OF_BOUNDS
+                                                                 : scan_memory<_Type>::NOT_READY;
                                                  });
         });
 
@@ -247,11 +256,12 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
             auto local_id = item.get_local_id(0);
             auto stride = item.get_local_range(0);
             auto subgroup = item.get_sub_group();
+            TileId dynamic_tile_id(scratch, scan_memory<_Type>::get_num_elements(num_wgs) * sizeof(FlagT));
 
             // Obtain unique ID for this work-group that will be used in decoupled lookback
             if (group.leader())
             {
-                tile_id_lacc[0] = scan_memory<_Type>::fetch_add_counter(num_wgs, scratch);
+                tile_id_lacc[0] = dynamic_tile_id.fetch_inc();
             }
             sycl::group_barrier(group);
             std::uint32_t tile_id = tile_id_lacc[0];
@@ -304,7 +314,12 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
         });
     });
 
-    scan_memory<_Type>::async_free(scratch, __queue, event);
+    __queue.submit(
+        [=](sycl::handler& hdl)
+        {
+            hdl.depends_on(event);
+            hdl.host_task([=]() { sycl::free(scratch, __queue); });
+        });
 
     event.wait();
 }
