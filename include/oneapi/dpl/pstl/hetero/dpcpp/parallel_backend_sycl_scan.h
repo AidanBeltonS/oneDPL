@@ -26,8 +26,67 @@ inline namespace igpu {
 
 constexpr ::std::size_t SUBGROUP_SIZE = 32;
 
+template <typename Type, template <typename> typename LoopbackScanMemory, typename TileId>
+struct ScanRawMemory
+{
+    using _TileIdT = typename TileId::_TileIdT;
+    using _FlagT = typename LoopbackScanMemory<Type>::_FlagT;
+
+    ScanRawMemory(sycl::queue q) : q{q} {};
+
+    ::std::uint8_t*
+    scan_memory_ptr() noexcept
+    {
+        return scan_memory_begin;
+    };
+
+    _TileIdT*
+    tile_id_ptr() noexcept
+    {
+        return tile_id_begin;
+    };
+
+    void
+    allocate(::std::size_t num_wgs)
+    {
+        ::std::size_t scan_memory_size = LoopbackScanMemory<Type>::get_memory_size(num_wgs);
+        constexpr ::std::size_t padded_tileid_size = TileId::get_padded_memory_size();
+        constexpr ::std::size_t tileid_size = TileId::get_memory_size();
+
+        auto mem_size_bytes = scan_memory_size + padded_tileid_size;
+
+        scratch = sycl::malloc_device<::std::uint8_t>(mem_size_bytes, q);
+
+        scan_memory_begin = scratch;
+
+        void* base_tileid_ptr = reinterpret_cast<void*>(scan_memory_begin + scan_memory_size);
+        size_t remainder = mem_size_bytes - scan_memory_size;
+
+        tile_id_begin = reinterpret_cast<_TileIdT*>(
+            ::std::align(::std::alignment_of_v<_TileIdT>, tileid_size, base_tileid_ptr, remainder));
+    }
+
+    sycl::event
+    async_free(sycl::event dependency)
+    {
+        return q.submit(
+            [e = dependency, ptr = scratch, q_ = q](sycl::handler& hdl)
+            {
+                hdl.depends_on(e);
+                hdl.host_task([=]() { sycl::free(ptr, q_); });
+            });
+    }
+
+  private:
+    ::std::uint8_t* scratch = nullptr;
+    ::std::uint8_t* scan_memory_begin = nullptr;
+    _TileIdT* tile_id_begin = nullptr;
+
+    sycl::queue q;
+};
+
 template <typename _T>
-struct ScanMemory
+struct LoopbackScanMemory
 {
     using _FlagT = ::std::uint32_t;
     using _AtomicFlagRefT = sycl::atomic_ref<_FlagT, sycl::memory_order::acq_rel, sycl::memory_scope::device,
@@ -40,20 +99,13 @@ struct ScanMemory
 
     static constexpr ::std::size_t padding = SUBGROUP_SIZE;
 
-    ScanMemory(::std::uint8_t* scan_memory_begin, ::std::size_t num_wgs) : num_elements(get_num_elements(num_wgs))
+    LoopbackScanMemory(::std::uint8_t* scan_memory_begin, ::std::size_t num_wgs)
+        : num_elements(get_num_elements(num_wgs))
     {
-        // In memory: [Partial Value, ..., Full Value, ..., Flag, ...]
-        // Each section is num_wgs + padding
-        _T* tile_values_begin = reinterpret_cast<_T*>(scan_memory_begin);
-        partial_values_begin = tile_values_begin;
-        full_values_begin = tile_values_begin + num_elements;
-
-        // Aligned flags
-        ::std::size_t tile_values_bytes = get_tile_values_bytes(num_elements);
-        void* base_flags = reinterpret_cast<void*>(scan_memory_begin + tile_values_bytes);
-        auto remainder = get_padded_flag_bytes(num_elements); // scan_memory_bytes - tile_values_bytes
-        flags_begin = reinterpret_cast<_FlagT*>(
-            ::std::align(::std::alignment_of_v<_FlagT>, get_flag_bytes(num_elements), base_flags, remainder));
+        // LoopbackScanMemory: [Partial Value, ..., Full Value, ..., Flag, ...]
+        // Each section has num_wgs + padding elements
+        tile_values_begin = reinterpret_cast<_T*>(scan_memory_begin);
+        flags_begin = get_flags_begin(scan_memory_begin, num_wgs);
     }
 
     void
@@ -61,7 +113,7 @@ struct ScanMemory
     {
         _AtomicFlagRefT atomic_flag(*(flags_begin + tile_id + padding));
 
-        partial_values_begin[tile_id + padding] = val;
+        tile_values_begin[tile_id + padding] = val;
         atomic_flag.store(PARTIAL_MASK);
     }
 
@@ -70,7 +122,7 @@ struct ScanMemory
     {
         _AtomicFlagRefT atomic_flag(*(flags_begin + tile_id + padding));
 
-        full_values_begin[tile_id + padding] = val;
+        tile_values_begin[tile_id + padding + num_elements] = val;
         atomic_flag.store(FULL_MASK);
     }
 
@@ -108,20 +160,26 @@ struct ScanMemory
         return get_flag_bytes(num_elements) + sizeof(_FlagT);
     }
 
+    static _FlagT*
+    get_flags_begin(::std::uint8_t* scan_memory_begin, ::std::size_t num_wgs)
+    {
+        // Aligned flags
+        ::std::size_t num_elements = get_num_elements(num_wgs);
+        ::std::size_t tile_values_bytes = get_tile_values_bytes(num_elements);
+        void* base_flags = reinterpret_cast<void*>(scan_memory_begin + tile_values_bytes);
+        auto remainder = get_padded_flag_bytes(num_elements); // scan_memory_bytes - tile_values_bytes
+        return reinterpret_cast<_FlagT*>(
+            ::std::align(::std::alignment_of_v<_FlagT>, get_flag_bytes(num_elements), base_flags, remainder));
+    }
+
     static ::std::size_t
     get_memory_size(::std::size_t num_wgs)
     {
         ::std::size_t num_elements = get_num_elements(num_wgs);
-        // sizeof(_T) extra bytes are not needed because ScanMemory is going at the beginning of the scratch
+        // sizeof(_T) extra bytes are not needed because LoopbackScanMemory is going at the beginning of the scratch
         ::std::size_t tile_values_bytes = get_tile_values_bytes(num_elements);
         // Padding to provide room for aligment
         ::std::size_t flag_bytes = get_padded_flag_bytes(num_elements);
-
-        std::cout << "get_memory_size " << std::endl;
-        std::cout << "  num_elements " << num_elements << std::endl;
-        std::cout << "  tile_values_bytes " << tile_values_bytes << std::endl;
-        std::cout << "  flag_bytes " << flag_bytes << std::endl;
-        std::cout << "  mem_size " << tile_values_bytes + flag_bytes << std::endl;
 
         return tile_values_bytes + flag_bytes;
     }
@@ -150,11 +208,10 @@ struct ScanMemory
         return flag == OUT_OF_BOUNDS;
     }
 
+  private:
     ::std::size_t num_elements;
     _FlagT* flags_begin;
     _T* tile_values_begin;
-    _T* partial_values_begin;
-    _T* full_values_begin;
 };
 
 struct TileId
@@ -188,74 +245,14 @@ struct TileId
     _AtomicTileRefT tile_counter;
 };
 
-template <typename Type, template <typename> typename ScanMemory, typename TileId>
-struct ScanScratchMemory
-{
-    using _TileIdT = typename TileId::_TileIdT;
-    using _FlagT = typename ScanMemory<Type>::_FlagT;
-
-    ScanScratchMemory(sycl::queue q) : q{q} {};
-
-    ::std::uint8_t*
-    scan_memory_ptr() noexcept
-    {
-        return scan_memory_begin;
-    };
-
-    _TileIdT*
-    tile_id_ptr() noexcept
-    {
-        return tile_id_begin;
-    };
-
-    void
-    allocate(::std::size_t num_wgs)
-    {
-        ::std::size_t scan_memory_size = ScanMemory<Type>::get_memory_size(num_wgs);
-        constexpr ::std::size_t padded_tileid_size = TileId::get_padded_memory_size();
-        constexpr ::std::size_t tileid_size = TileId::get_memory_size();
-
-        mem_size_bytes = scan_memory_size + padded_tileid_size;
-
-        scratch = reinterpret_cast<::std::uint8_t*>(sycl::malloc_device(mem_size_bytes, q));
-
-        scan_memory_begin = scratch;
-
-        void* base_tileid_ptr = reinterpret_cast<void*>(scan_memory_begin + scan_memory_size);
-        size_t remainder = mem_size_bytes - scan_memory_size;
-
-        tile_id_begin = reinterpret_cast<_TileIdT*>(
-            ::std::align(::std::alignment_of_v<_TileIdT>, tileid_size, base_tileid_ptr, remainder));
-    }
-
-    void
-    async_free(sycl::event event_dependency)
-    {
-        q.submit(
-            [=](sycl::handler& hdl)
-            {
-                hdl.depends_on(event_dependency);
-                hdl.host_task([=]() { sycl::free(scratch, q); });
-            });
-    }
-
-    ::std::size_t mem_size_bytes;
-    ::std::uint8_t* scratch = nullptr;
-
-    ::std::uint8_t* scan_memory_begin = nullptr;
-    _TileIdT* tile_id_begin = nullptr;
-
-    sycl::queue q;
-};
-
 struct cooperative_lookback
 {
 
-    template <typename _T, typename _Subgroup, typename BinOp, template <typename> typename ScanMemory>
+    template <typename _T, typename _Subgroup, typename BinOp, template <typename> typename LoopbackScanMemory>
     _T
-    operator()(std::uint32_t tile_id, const _Subgroup& subgroup, BinOp bin_op, ScanMemory<_T> memory)
+    operator()(std::uint32_t tile_id, const _Subgroup& subgroup, BinOp bin_op, LoopbackScanMemory<_T> memory)
     {
-        using FlagT = typename ScanMemory<_T>::_FlagT;
+        using FlagT = typename LoopbackScanMemory<_T>::_FlagT;
 
         _T sum = 0;
         int offset = -1;
@@ -268,14 +265,14 @@ struct cooperative_lookback
             do
             {
                 flag = memory.load_flag(tile - local_id);
-            } while (!sycl::all_of_group(subgroup, ScanMemory<_T>::is_ready(flag))); // Loop till all ready
+            } while (!sycl::all_of_group(subgroup, LoopbackScanMemory<_T>::is_ready(flag))); // Loop till all ready
 
-            bool is_full = ScanMemory<_T>::is_full(flag);
+            bool is_full = LoopbackScanMemory<_T>::is_full(flag);
             auto is_full_ballot = sycl::ext::oneapi::group_ballot(subgroup, is_full);
             auto lowest_item_with_full = is_full_ballot.find_low();
 
             // TODO: Use identity_fn for out of bounds values
-            _T contribution = local_id <= lowest_item_with_full && (!ScanMemory<_T>::is_out_of_bounds(flag))
+            _T contribution = local_id <= lowest_item_with_full && !LoopbackScanMemory<_T>::is_out_of_bounds(flag)
                                   ? memory.get_value(tile - local_id, flag)
                                   : _T{0};
 
@@ -300,7 +297,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
 {
     using _Type = oneapi::dpl::__internal::__value_t<_InRange>;
     using _TileIdT = TileId::_TileIdT;
-    using _FlagT = typename ScanMemory<_Type>::_FlagT;
+    using _FlagT = typename LoopbackScanMemory<_Type>::_FlagT;
 
     static_assert(_Inclusive, "Single-pass scan only available for inclusive scan");
 
@@ -314,24 +311,18 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     ::std::size_t num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(n, elems_in_tile);
     ::std::size_t num_workitems = num_wgs * wgsize;
 
-    // TODO: Remove Dynamic Tile Counter from the middle of the scratch
-    // Probably the best way is to have in memory: Values, Flags, Acc. Align memory.
-    // Right Now -> Assumes TileId::TileIdT and ScanMemory<_Type>::FlagT are the same type
-    ScanScratchMemory<_Type, ScanMemory, TileId> scan_scratch(__queue);
+    ScanRawMemory<_Type, LoopbackScanMemory, TileId> scan_scratch(__queue);
     scan_scratch.allocate(num_wgs);
 
+    // Memory Structure:
+    // [Loopback Scan Memory, Tile Id Counter]
     auto scan_memory_begin = scan_scratch.scan_memory_ptr();
+    auto status_flags_begin = LoopbackScanMemory<_Type>::get_flags_begin(scan_memory_begin, num_wgs);
     auto tile_id_begin = scan_scratch.tile_id_ptr();
 
-    ::std::size_t num_elements = ScanMemory<_Type>::get_num_elements(num_wgs);
-    ::std::size_t fill_num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(num_elements, wgsize);
-    ::std::size_t tile_values_bytes = ScanMemory<_Type>::get_tile_values_bytes(num_elements);
-    void* base_flags = reinterpret_cast<void*>(scan_memory_begin + tile_values_bytes);
-    auto remainder = ScanMemory<_Type>::get_padded_flag_bytes(num_elements);
-    auto status_flags_begin = reinterpret_cast<_FlagT*>(::std::align(
-        ::std::alignment_of_v<_FlagT>, ScanMemory<_Type>::get_flag_bytes(num_elements), base_flags, remainder));
-
-    std::cout << "OMG " << tile_values_bytes << std::endl << std::flush;
+    ::std::size_t num_elements = LoopbackScanMemory<_Type>::get_num_elements(num_wgs);
+    // fill_num_wgs to also initialize tile_id_counter
+    ::std::size_t fill_num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(num_elements + 1, wgsize);
 
     auto fill_event = __queue.submit(
         [&](sycl::handler& hdl)
@@ -341,15 +332,15 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
                                                  {
                                                      int id = item.get_global_linear_id();
                                                      if (id < num_elements)
-                                                         status_flags_begin[id] = id < ScanMemory<_Type>::padding
-                                                                                      ? ScanMemory<_Type>::OUT_OF_BOUNDS
-                                                                                      : ScanMemory<_Type>::NOT_READY;
+                                                         status_flags_begin[id] =
+                                                             id < LoopbackScanMemory<_Type>::padding
+                                                                 ? LoopbackScanMemory<_Type>::OUT_OF_BOUNDS
+                                                                 : LoopbackScanMemory<_Type>::NOT_READY;
                                                      if (id == num_elements)
                                                          tile_id_begin[0] = 0;
                                                  });
         });
 
-    std::cout << "OMG" << std::endl << std::flush;
 
     auto event = __queue.submit([&](sycl::handler& hdl) {
         auto tile_id_lacc = sycl::local_accessor<std::uint32_t, 1>(sycl::range<1>{1}, hdl);
@@ -362,9 +353,9 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
             auto local_id = item.get_local_id(0);
             auto stride = item.get_local_range(0);
             auto subgroup = item.get_sub_group();
-            TileId dynamic_tile_id(tile_id_begin);
 
             // Obtain unique ID for this work-group that will be used in decoupled lookback
+            TileId dynamic_tile_id(tile_id_begin);
             if (group.leader())
             {
                 tile_id_lacc[0] = dynamic_tile_id.fetch_inc();
@@ -403,7 +394,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
             // The first sub-group will query the previous tiles to find a prefix
             if (subgroup.get_group_id() == 0)
             {
-                ScanMemory<_Type> scan_mem(scan_memory_begin, num_wgs);
+                LoopbackScanMemory<_Type> scan_mem(scan_memory_begin, num_wgs);
 
                 if (group.leader())
                     scan_mem.set_partial(tile_id, local_sum);
