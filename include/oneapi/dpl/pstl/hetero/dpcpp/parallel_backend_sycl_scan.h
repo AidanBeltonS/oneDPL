@@ -27,12 +27,12 @@ inline namespace igpu {
 constexpr ::std::size_t SUBGROUP_SIZE = 32;
 
 template <typename Type, template <typename> typename LoopbackScanMemory, typename TileId>
-struct ScanRawMemory
+struct ScanMemoryManager
 {
     using _TileIdT = typename TileId::_TileIdT;
     using _FlagT = typename LoopbackScanMemory<Type>::_FlagT;
 
-    ScanRawMemory(sycl::queue q) : q{q} {};
+    ScanMemoryManager(sycl::queue q) : q{q} {};
 
     ::std::uint8_t*
     scan_memory_ptr() noexcept
@@ -311,17 +311,17 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     ::std::size_t num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(n, elems_in_tile);
     ::std::size_t num_workitems = num_wgs * wgsize;
 
-    ScanRawMemory<_Type, LoopbackScanMemory, TileId> scan_scratch(__queue);
-    scan_scratch.allocate(num_wgs);
+    ScanMemoryManager<_Type, LoopbackScanMemory, TileId> scratch(__queue);
+    scratch.allocate(num_wgs);
 
     // Memory Structure:
     // [Loopback Scan Memory, Tile Id Counter]
-    auto scan_memory_begin = scan_scratch.scan_memory_ptr();
+    auto scan_memory_begin = scratch.scan_memory_ptr();
     auto status_flags_begin = LoopbackScanMemory<_Type>::get_flags_begin(scan_memory_begin, num_wgs);
-    auto tile_id_begin = scan_scratch.tile_id_ptr();
+    auto tile_id_begin = scratch.tile_id_ptr();
 
     ::std::size_t num_elements = LoopbackScanMemory<_Type>::get_num_elements(num_wgs);
-    // fill_num_wgs to also initialize tile_id_counter
+    // fill_num_wgs num_elements + 1 to also initialize tile_id_counter
     ::std::size_t fill_num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(num_elements + 1, wgsize);
 
     auto fill_event = __queue.submit(
@@ -411,7 +411,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
         });
     });
 
-    scan_scratch.async_free(event);
+    scratch.async_free(event);
 
     event.wait();
 }
