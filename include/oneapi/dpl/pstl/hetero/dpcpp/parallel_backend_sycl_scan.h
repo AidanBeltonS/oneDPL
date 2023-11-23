@@ -26,13 +26,13 @@ inline namespace igpu {
 
 constexpr ::std::size_t SUBGROUP_SIZE = 32;
 
-template <typename Type, typename UseAtomic64, template <typename, typename> typename LoopbackScanMemory,
+template <typename Type, typename UseAtomic64, template <typename, typename> typename LookbackScanMemory,
           typename TileId>
 struct ScanMemoryManager
 {
     using _TileIdT = typename TileId::_TileIdT;
-    using _LoopbackScanMemory = LoopbackScanMemory<Type, UseAtomic64>;
-    using _FlagT = typename _LoopbackScanMemory::_FlagT;
+    using _LookbackScanMemory = LookbackScanMemory<Type, UseAtomic64>;
+    using _FlagT = typename _LookbackScanMemory::_FlagT;
 
     ScanMemoryManager(sycl::queue q) : q{q} {};
 
@@ -51,7 +51,7 @@ struct ScanMemoryManager
     void
     allocate(::std::size_t num_wgs)
     {
-        ::std::size_t scan_memory_size = _LoopbackScanMemory::get_memory_size(num_wgs);
+        ::std::size_t scan_memory_size = _LookbackScanMemory::get_memory_size(num_wgs);
         constexpr ::std::size_t padded_tileid_size = TileId::get_padded_memory_size();
         constexpr ::std::size_t tileid_size = TileId::get_memory_size();
 
@@ -88,10 +88,10 @@ struct ScanMemoryManager
 };
 
 template <typename _T, typename UseAtomic64>
-struct LoopbackScanMemory;
+struct LookbackScanMemory;
 
 template <typename _T>
-struct LoopbackScanMemory<_T, /* UseAtomic64=*/::std::false_type>
+struct LookbackScanMemory<_T, /* UseAtomic64=*/::std::false_type>
 {
     using _FlagT = ::std::uint32_t;
     using _AtomicFlagRefT = sycl::atomic_ref<_FlagT, sycl::memory_order::acq_rel, sycl::memory_scope::device,
@@ -104,9 +104,9 @@ struct LoopbackScanMemory<_T, /* UseAtomic64=*/::std::false_type>
 
     static constexpr ::std::size_t padding = SUBGROUP_SIZE;
 
-    // LoopbackScanMemory: [Partial Value, ..., Full Value, ..., Flag, ...]
+    // LookbackScanMemory: [Partial Value, ..., Full Value, ..., Flag, ...]
     // Each section has num_wgs + padding elements
-    LoopbackScanMemory(::std::uint8_t* scan_memory_begin, ::std::size_t num_wgs)
+    LookbackScanMemory(::std::uint8_t* scan_memory_begin, ::std::size_t num_wgs)
         : num_elements(get_num_elements(num_wgs)), tile_values_begin(reinterpret_cast<_T*>(scan_memory_begin)),
           flags_begin(get_flags_begin(scan_memory_begin, num_wgs))
     {
@@ -178,7 +178,7 @@ struct LoopbackScanMemory<_T, /* UseAtomic64=*/::std::false_type>
     get_memory_size(::std::size_t num_wgs)
     {
         ::std::size_t num_elements = get_num_elements(num_wgs);
-        // sizeof(_T) extra bytes are not needed because LoopbackScanMemory is going at the beginning of the scratch
+        // sizeof(_T) extra bytes are not needed because LookbackScanMemory is going at the beginning of the scratch
         ::std::size_t tile_values_bytes = get_tile_values_bytes(num_elements);
         // Padding to provide room for aligment
         ::std::size_t flag_bytes = get_padded_flag_bytes(num_elements);
@@ -217,7 +217,7 @@ struct LoopbackScanMemory<_T, /* UseAtomic64=*/::std::false_type>
 };
 
 template <typename _T>
-struct LoopbackScanMemory<_T, /* UseAtomic64=*/::std::true_type>
+struct LookbackScanMemory<_T, /* UseAtomic64=*/::std::true_type>
 {
     using _FlagT = ::std::uint64_t;
     using _AtomicFlagRefT = sycl::atomic_ref<_FlagT, sycl::memory_order::relaxed, sycl::memory_scope::device,
@@ -244,7 +244,7 @@ struct LoopbackScanMemory<_T, /* UseAtomic64=*/::std::true_type>
 
     static constexpr ::std::size_t padding = SUBGROUP_SIZE;
 
-    LoopbackScanMemory(::std::uint8_t* scan_memory_begin, ::std::size_t num_wgs)
+    LookbackScanMemory(::std::uint8_t* scan_memory_begin, ::std::size_t num_wgs)
         : num_elements(get_num_elements(num_wgs)), flags_begin(get_flags_begin(scan_memory_begin, num_wgs))
     {
     }
@@ -318,7 +318,6 @@ struct LoopbackScanMemory<_T, /* UseAtomic64=*/::std::true_type>
   private:
     ::std::size_t num_elements;
     _FlagT* flags_begin;
-    _T* tile_values_begin;
 };
 
 struct TileId
@@ -356,13 +355,13 @@ struct cooperative_lookback
 {
 
     template <typename _T, typename _Subgroup, typename BinOp,
-              template <typename, typename> typename LoopbackScanMemory, typename UseAtomic64>
+              template <typename, typename> typename LookbackScanMemory, typename UseAtomic64>
     _T
     operator()(std::uint32_t tile_id, const _Subgroup& subgroup, BinOp bin_op,
-               LoopbackScanMemory<_T, UseAtomic64> memory)
+               LookbackScanMemory<_T, UseAtomic64> memory)
     {
-        using _LoopbackScanMemory = LoopbackScanMemory<_T, UseAtomic64>;
-        using FlagT = typename _LoopbackScanMemory::_FlagT;
+        using _LookbackScanMemory = LookbackScanMemory<_T, UseAtomic64>;
+        using FlagT = typename _LookbackScanMemory::_FlagT;
 
         _T sum = 0;
         int offset = -1;
@@ -376,14 +375,14 @@ struct cooperative_lookback
             do
             {
                 flag = atomic_flag.load();
-            } while (!sycl::all_of_group(subgroup, _LoopbackScanMemory::is_ready(flag))); // Loop till all ready
+            } while (!sycl::all_of_group(subgroup, _LookbackScanMemory::is_ready(flag))); // Loop till all ready
 
-            bool is_full = _LoopbackScanMemory::is_full(flag);
+            bool is_full = _LookbackScanMemory::is_full(flag);
             auto is_full_ballot = sycl::ext::oneapi::group_ballot(subgroup, is_full);
             auto lowest_item_with_full = is_full_ballot.find_low();
 
             // TODO: Use identity_fn for out of bounds values
-            _T contribution = local_id <= lowest_item_with_full && !_LoopbackScanMemory::is_out_of_bounds(flag)
+            _T contribution = local_id <= lowest_item_with_full && !_LookbackScanMemory::is_out_of_bounds(flag)
                                   ? memory.get_value(tile - local_id, flag)
                                   : _T{0};
 
@@ -409,8 +408,8 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
 {
     using _Type = oneapi::dpl::__internal::__value_t<_InRange>;
     using _TileIdT = TileId::_TileIdT;
-    using _LoopBackScanMemory = LoopbackScanMemory<_Type, _UseAtomic64>;
-    using _FlagT = typename _LoopBackScanMemory::_FlagT;
+    using _LookbackScanMemory = LookbackScanMemory<_Type, _UseAtomic64>;
+    using _FlagT = typename _LookbackScanMemory::_FlagT;
 
     static_assert(std::is_same_v<_Inclusive, ::std::true_type>, "Single-pass scan only available for inclusive scan");
 
@@ -423,16 +422,16 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
     ::std::size_t num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(n, elems_in_tile);
     ::std::size_t num_workitems = num_wgs * wgsize;
 
-    ScanMemoryManager<_Type, _UseAtomic64, LoopbackScanMemory, TileId> scratch(__queue);
+    ScanMemoryManager<_Type, _UseAtomic64, LookbackScanMemory, TileId> scratch(__queue);
     scratch.allocate(num_wgs);
 
     // Memory Structure:
-    // [Loopback Scan Memory, Tile Id Counter]
+    // [Lookback Scan Memory, Tile Id Counter]
     auto scan_memory_begin = scratch.scan_memory_ptr();
-    auto status_flags_begin = _LoopBackScanMemory::get_flags_begin(scan_memory_begin, num_wgs);
+    auto status_flags_begin = _LookbackScanMemory::get_flags_begin(scan_memory_begin, num_wgs);
     auto tile_id_begin = scratch.tile_id_ptr();
 
-    ::std::size_t num_elements = _LoopBackScanMemory::get_num_elements(num_wgs);
+    ::std::size_t num_elements = _LookbackScanMemory::get_num_elements(num_wgs);
     // fill_num_wgs num_elements + 1 to also initialize tile_id_counter
     ::std::size_t fill_num_wgs = oneapi::dpl::__internal::__dpl_ceiling_div(num_elements + 1, wgsize);
 
@@ -444,9 +443,9 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
                              {
                                  int id = item.get_global_linear_id();
                                  if (id < num_elements)
-                                     status_flags_begin[id] = id < _LoopBackScanMemory::padding
-                                                                  ? _LoopBackScanMemory::OUT_OF_BOUNDS
-                                                                  : _LoopBackScanMemory::NOT_READY;
+                                     status_flags_begin[id] = id < _LookbackScanMemory::padding
+                                                                  ? _LookbackScanMemory::OUT_OF_BOUNDS
+                                                                  : _LookbackScanMemory::NOT_READY;
                                  if (id == num_elements)
                                      tile_id_begin[0] = 0;
                              });
@@ -512,7 +511,7 @@ single_pass_scan_impl(sycl::queue __queue, _InRange&& __in_rng, _OutRange&& __ou
                              // The first sub-group will query the previous tiles to find a prefix
                              if (subgroup.get_group_id() == 0)
                              {
-                                 _LoopBackScanMemory scan_mem(scan_memory_begin, num_wgs);
+                                 _LookbackScanMemory scan_mem(scan_memory_begin, num_wgs);
 
                                  if (group.leader())
                                      scan_mem.set_partial(tile_id, local_sum);
