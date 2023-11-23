@@ -104,13 +104,12 @@ struct LoopbackScanMemory<_T, /* UseAtomic64=*/::std::false_type>
 
     static constexpr ::std::size_t padding = SUBGROUP_SIZE;
 
+    // LoopbackScanMemory: [Partial Value, ..., Full Value, ..., Flag, ...]
+    // Each section has num_wgs + padding elements
     LoopbackScanMemory(::std::uint8_t* scan_memory_begin, ::std::size_t num_wgs)
-        : num_elements(get_num_elements(num_wgs))
+        : num_elements(get_num_elements(num_wgs)), tile_values_begin(reinterpret_cast<_T*>(scan_memory_begin)),
+          flags_begin(get_flags_begin(scan_memory_begin, num_wgs))
     {
-        // LoopbackScanMemory: [Partial Value, ..., Full Value, ..., Flag, ...]
-        // Each section has num_wgs + padding elements
-        tile_values_begin = reinterpret_cast<_T*>(scan_memory_begin);
-        flags_begin = get_flags_begin(scan_memory_begin, num_wgs);
     }
 
     void
@@ -131,19 +130,17 @@ struct LoopbackScanMemory<_T, /* UseAtomic64=*/::std::false_type>
         atomic_flag.store(FULL_MASK);
     }
 
-    _FlagT
-    load_flag(::std::size_t tile_id) const
+    _AtomicFlagRefT
+    get_flag(::std::size_t tile_id) const
     {
-        _AtomicFlagRefT atomic_flag(*(flags_begin + tile_id + padding));
-
-        return atomic_flag.load();
+        return _AtomicFlagRefT(*(flags_begin + tile_id + padding));
     }
 
     _T
     get_value(::std::size_t tile_id, _FlagT flag) const
     {
-        ::std::size_t offset = tile_id + padding + num_elements * is_full(flag);
-        return tile_values_begin[offset];
+        // full_value and partial_value are num_elements apart
+        return *(tile_values_begin + tile_id + padding + num_elements * is_full(flag));
     }
 
     static ::std::size_t
@@ -243,16 +240,13 @@ struct LoopbackScanMemory<_T, /* UseAtomic64=*/::std::true_type>
     static constexpr _FlagT FULL_MASK = 1l << (sizeof(_FlagT) * 8 - 1);
     static constexpr _FlagT OUT_OF_BOUNDS = PARTIAL_MASK | FULL_MASK;
 
-    static constexpr _FlagT VALUE_MASK = (1l << sizeof(::std::uint32_t) * 8) - 1; // 32bit-mask to store value
+    static constexpr _FlagT VALUE_MASK = (1l << sizeof(::std::uint32_t) * 8) - 1; // 32 bit mask to store value
 
     static constexpr ::std::size_t padding = SUBGROUP_SIZE;
 
     LoopbackScanMemory(::std::uint8_t* scan_memory_begin, ::std::size_t num_wgs)
-        : num_elements(get_num_elements(num_wgs))
+        : num_elements(get_num_elements(num_wgs)), flags_begin(get_flags_begin(scan_memory_begin, num_wgs))
     {
-        // LoopbackScanMemory: [Partial Value, ..., Full Value, ..., Flag, ...]
-        // Each section has num_wgs + padding elements
-        flags_begin = get_flags_begin(scan_memory_begin, num_wgs);
     }
 
     void
@@ -271,12 +265,10 @@ struct LoopbackScanMemory<_T, /* UseAtomic64=*/::std::true_type>
         atomic_flag.store(FULL_MASK | static_cast<::std::uint32_t>(val));
     }
 
-    _FlagT
-    load_flag(::std::size_t tile_id) const
+    _AtomicFlagRefT
+    get_flag(::std::size_t tile_id) const
     {
-        _AtomicFlagRefT atomic_flag(*(flags_begin + tile_id + padding));
-
-        return atomic_flag.load();
+        return _AtomicFlagRefT(*(flags_begin + tile_id + padding));
     }
 
     _T
@@ -379,10 +371,11 @@ struct cooperative_lookback
 
         for (int tile = static_cast<int>(tile_id) + offset; tile >= 0; tile -= SUBGROUP_SIZE)
         {
+            auto atomic_flag = memory.get_flag(tile - local_id);
             FlagT flag;
             do
             {
-                flag = memory.load_flag(tile - local_id);
+                flag = atomic_flag.load();
             } while (!sycl::all_of_group(subgroup, _LoopbackScanMemory::is_ready(flag))); // Loop till all ready
 
             bool is_full = _LoopbackScanMemory::is_full(flag);
@@ -563,13 +556,25 @@ single_pass_inclusive_scan(sycl::queue __queue, _InIterator __in_begin, _InItera
         oneapi::dpl::__ranges::__get_sycl_range<__par_backend_hetero::access_mode::write, _OutIterator>();
     auto __buf2 = __keep2(__out_begin, __out_begin + __n);
 
-    if (__queue.get_device().has(sycl::aspect::atomic64) &&
-        sizeof(typename std::iterator_traits<_InIterator>::value_type) <= sizeof(std::uint32_t))
-        single_pass_scan_impl<_KernelParam, /* Inclusive */ std::true_type, /* UseAtomic64 */ std::true_type>(
-            __queue, __buf1.all_view(), __buf2.all_view(), __binary_op);
+    // Avoid aspect query overhead for sizeof(Types) > 32 bits
+    if constexpr (sizeof(typename std::iterator_traits<_InIterator>::value_type) <= sizeof(std::uint32_t))
+    {
+        if (__queue.get_device().has(sycl::aspect::atomic64))
+        {
+            single_pass_scan_impl<_KernelParam, /* Inclusive */ std::true_type, /* UseAtomic64 */ std::true_type>(
+                __queue, __buf1.all_view(), __buf2.all_view(), __binary_op);
+        }
+        else
+        {
+            single_pass_scan_impl<_KernelParam, /* Inclusive */ std::true_type, /* UseAtomic64 */ std::false_type>(
+                __queue, __buf1.all_view(), __buf2.all_view(), __binary_op);
+        }
+    }
     else
+    {
         single_pass_scan_impl<_KernelParam, /* Inclusive */ std::true_type, /* UseAtomic64 */ std::false_type>(
             __queue, __buf1.all_view(), __buf2.all_view(), __binary_op);
+    }
 }
 
 } // inline namespace igpu
